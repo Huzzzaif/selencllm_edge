@@ -37,6 +37,10 @@ PHI categories:
 - CREDIT_CARD: credit card numbers
 - RELATIONSHIP: spouse, son, daughter, wife, husband references
 
+Pay special attention to these commonly missed categories:
+PERSON (full names, titles + surnames), DIAGNOSIS (conditions, medications),
+RELATIONSHIP (wife, husband, son, daughter).
+
 CRITICAL SPAN RULES:
 - Span must be the MINIMUM sensitive token only — the actual value, not surrounding label words.
 - Do NOT include context words like "SSN", "Patient", "Name:", "DOB:", etc. adjacent to the value.

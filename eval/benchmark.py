@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.runner import load_ai4privacy, compute_utility_score
+from eval.runner import load_ai4privacy, load_mtsamples, compute_utility_score
 
 TABLES_DIR  = os.path.join(os.path.dirname(__file__), "..", "paper", "tables")
 os.makedirs(TABLES_DIR, exist_ok=True)
@@ -96,22 +96,32 @@ class RegexBaseline:
     def __init__(self):
         import re
         from memory.seed_patterns import SEED_PATTERNS
-        self._patterns = [(label, re.compile(regex), phi_type)
-                          for label, regex, phi_type, _ in SEED_PATTERNS]
+        from encryption.chacha import ChaChaEncryptor
+        self._patterns  = [(label, re.compile(regex), phi_type)
+                           for label, regex, phi_type, _ in SEED_PATTERNS]
+        self._encryptor = ChaChaEncryptor()
 
     def process(self, sentence: str, gt_spans: list[str]) -> dict:
         t = time.time()
         pred_spans = []
-        masked = sentence
+        # Find all matches in original sentence (sorted rightmost first to preserve offsets)
+        hits = []
         for label, pattern, phi_type in self._patterns:
             for m in pattern.finditer(sentence):
                 pred_spans.append({"span": m.group(), "phi_type": phi_type})
-        # Mask by replacing left-to-right (no overlap issues for regex baseline)
+                hits.append((m.start(), m.end(), m.group()))
+        hits.sort(key=lambda x: x[0], reverse=True)
+
+        masked = sentence
         seen = set()
-        for sp in pred_spans:
-            if sp["span"] not in seen:
-                masked = masked.replace(sp["span"], "[REDACTED]", 1)
-                seen.add(sp["span"])
+        for start, end, span in hits:
+            if span in seen:
+                continue
+            seen.add(span)
+            token, _ = self._encryptor.encrypt_span(span)
+            idx = masked.find(span)
+            if idx != -1:
+                masked = masked[:idx] + token + masked[idx + len(span):]
         return {
             "masked":      masked,
             "pred_spans":  pred_spans,
@@ -131,17 +141,20 @@ class SpacyBaseline:
 
     def __init__(self):
         import spacy
-        self._nlp = spacy.load("en_core_web_lg")
+        from encryption.chacha import ChaChaEncryptor
+        self._nlp       = spacy.load("en_core_web_lg")
+        self._encryptor = ChaChaEncryptor()
 
     def process(self, sentence: str, gt_spans: list[str]) -> dict:
         t = time.time()
         doc = self._nlp(sentence)
         pred_spans = []
         masked = sentence
-        for ent in reversed(doc.ents):  # reversed to preserve offsets
+        for ent in reversed(doc.ents):  # reversed preserves char offsets
             phi_type = self._LABEL_MAP.get(ent.label_, ent.label_)
             pred_spans.append({"span": ent.text, "phi_type": phi_type})
-            masked = masked[:ent.start_char] + "[REDACTED]" + masked[ent.end_char:]
+            token, _ = self._encryptor.encrypt_span(ent.text)
+            masked = masked[:ent.start_char] + token + masked[ent.end_char:]
         return {
             "masked":     masked,
             "pred_spans": pred_spans,
@@ -157,8 +170,10 @@ class PresidioBaseline:
     def __init__(self):
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
+        from encryption.chacha import ChaChaEncryptor
         self._analyzer   = AnalyzerEngine()
         self._anonymizer = AnonymizerEngine()
+        self._encryptor  = ChaChaEncryptor()
 
     def process(self, sentence: str, gt_spans: list[str]) -> dict:
         t = time.time()
@@ -168,13 +183,12 @@ class PresidioBaseline:
                 {"span": sentence[r.start:r.end], "phi_type": r.entity_type}
                 for r in results
             ]
-            from presidio_anonymizer.entities import OperatorConfig
-            anonymized = self._anonymizer.anonymize(
-                text=sentence,
-                analyzer_results=results,
-                operators={"DEFAULT": OperatorConfig("replace", {"new_value": "[REDACTED]"})},
-            )
-            masked = anonymized.text
+            # Encrypt each detected span (rightmost first to preserve offsets)
+            masked = sentence
+            for r in sorted(results, key=lambda x: x.start, reverse=True):
+                span = sentence[r.start:r.end]
+                token, _ = self._encryptor.encrypt_span(span)
+                masked = masked[:r.start] + token + masked[r.end:]
         except Exception as e:
             print(f"[Presidio] Error: {e}")
             pred_spans = []
@@ -381,7 +395,10 @@ def _compile_results(records: dict, per_type: dict,
 
 # ── Save results ──────────────────────────────────────────────────────────────
 
-def save_results(results: dict):
+def save_results(results: dict, tag: str = ""):
+    """Save benchmark outputs. tag is appended to filenames (e.g. '_mtsamples')."""
+    suffix = f"_{tag}" if tag else ""
+
     def write_csv(name: str, rows: list[dict]):
         if not rows:
             return
@@ -392,13 +409,13 @@ def save_results(results: dict):
             writer.writerows(rows)
         print(f"  Saved {path}")
 
-    write_csv("benchmark_detection.csv", results["detection"])
-    write_csv("benchmark_latency.csv",   results["latency"])
-    write_csv("benchmark_security.csv",  results["security"])
-    write_csv("benchmark_scale.csv",     results["scale"])
-    write_csv("benchmark_per_type.csv",  results["per_type"])
+    write_csv(f"benchmark_detection{suffix}.csv", results["detection"])
+    write_csv(f"benchmark_latency{suffix}.csv",   results["latency"])
+    write_csv(f"benchmark_security{suffix}.csv",  results["security"])
+    write_csv(f"benchmark_scale{suffix}.csv",     results["scale"])
+    write_csv(f"benchmark_per_type{suffix}.csv",  results["per_type"])
 
-    summary_path = os.path.join(TABLES_DIR, "benchmark_summary.json")
+    summary_path = os.path.join(TABLES_DIR, f"benchmark_summary{suffix}.json")
     with open(summary_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"  Saved {summary_path}")
@@ -443,19 +460,41 @@ def print_summary(results: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SELENCLLM Benchmark")
     parser.add_argument("--n",       type=int, default=500,
-                        help="Number of samples (default: 500)")
+                        help="Number of samples per dataset (default: 500)")
     parser.add_argument("--systems", type=str, default="regex,spacy,presidio,cold,warm",
-                        help="Comma-separated systems to run (regex,spacy,presidio,cold,warm)")
+                        help="Comma-separated systems (regex,spacy,presidio,cold,warm)")
+    parser.add_argument("--dataset", type=str, default="ai4privacy",
+                        help="Dataset(s) to run: ai4privacy, mtsamples, or both (default: ai4privacy)")
     args = parser.parse_args()
 
-    selected = [s.strip() for s in args.systems.split(",")]
-    print(f"Systems: {selected}  |  Samples: {args.n}")
+    selected  = [s.strip() for s in args.systems.split(",")]
+    datasets  = [d.strip() for d in args.dataset.split(",")]
+    if "both" in datasets:
+        datasets = ["ai4privacy", "mtsamples"]
 
-    samples = load_ai4privacy(n=args.n)
-    systems = build_systems(selected)
+    print(f"Systems: {selected}  |  Samples: {args.n}  |  Datasets: {datasets}")
 
-    results = run_benchmark(samples, systems)
+    for dataset in datasets:
+        print(f"\n{'='*60}")
+        print(f"  Dataset: {dataset.upper()}")
+        print(f"{'='*60}")
 
-    print("\nSaving results...")
-    save_results(results)
-    print_summary(results)
+        if dataset == "ai4privacy":
+            samples = load_ai4privacy(n=args.n)
+            tag     = ""
+        elif dataset == "mtsamples":
+            samples = load_mtsamples(n=args.n)
+            tag     = "mtsamples"
+            print("  Note: MTSamples has no PHI annotations — "
+                  "detection metrics (P/R/F1) are not available for this dataset.")
+        else:
+            print(f"  Unknown dataset '{dataset}', skipping.")
+            continue
+
+        # Rebuild systems per dataset run (resets memory state for cold)
+        systems = build_systems(selected)
+        results = run_benchmark(samples, systems)
+
+        print(f"\nSaving results ({dataset})...")
+        save_results(results, tag=tag)
+        print_summary(results)

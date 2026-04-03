@@ -76,6 +76,35 @@ def load_ai4privacy(n: int = EVAL_SAMPLE_SIZE) -> list[dict]:
     return samples
 
 
+def load_mtsamples(n: int = EVAL_SAMPLE_SIZE) -> list[dict]:
+    """
+    Load MTSamples medical transcription dataset.
+    Returns list of {text, phi_spans: [], dataset: 'mtsamples'} dicts.
+    phi_spans is always empty — MTSamples has no PHI annotations,
+    so detection metrics (P/R/F1) are not computable; latency and
+    security metrics are still valid.
+    """
+    MTSAMPLES_NAME = "rungalileo/medical_transcription_40"
+    print(f"[Eval] Loading {MTSAMPLES_NAME} ...")
+    ds = load_dataset(MTSAMPLES_NAME, split="train", streaming=True)
+
+    samples = []
+    for row in ds:
+        if len(samples) >= n:
+            break
+        text = row.get("text") or ""
+        if not text.strip():
+            continue
+        samples.append({
+            "text":      text.strip(),
+            "phi_spans": [],          # no GT annotations available
+            "dataset":   "mtsamples",
+        })
+
+    print(f"[Eval] Loaded {len(samples)} MTSamples samples.")
+    return samples
+
+
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 def compute_detection_metrics(
