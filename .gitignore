@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+memory/pattern_memory.json
+agent_params.json
+data/
+paper/tables/eval_raw.csv
+paper/tables/*.json
+*.egg-info/
+.env
