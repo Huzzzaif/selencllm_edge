@@ -109,7 +109,3 @@ python -m core.run --config config.py --input mtsamples.csv
 ## Future work
 
 TEE-based attestation for multi-device deployments, zero-knowledge proofs for server-side anonymization verification, and domain-specific LLM fine-tuning for clinical and financial corpora.
-
-## License
-
-[Choose one — MIT is the simplest default. Add a LICENSE file.]
